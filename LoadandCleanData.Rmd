@@ -1,0 +1,589 @@
+---
+title: "BikeShareRidership_DataPrep"
+author: "levinemi"
+date: "21/10/2020"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,tidy.opts=list(width.cutoff=60),tidy=TRUE)
+```
+# Bike Share Ridership Toronto Data Load and Preparation
+
+Bike Share Ridership data for the City of Toronto is available through the Toronto Open Data Catalogue (https://open.toronto.ca/). I'm planning on doing a few ML, GIS and analytics projects with the data.  I used the scrip below to import, clean and prepare the data for those analyses.  
+
+### Loading Libraries
+```{r Loading Libraries, warning=FALSE, message=FALSE}
+library(opendatatoronto)
+library(data.table)
+library(stringdist)
+library(lubridate) #date fields
+library(RColorBrewer)#graph colors
+library(jsonlite)#json parser
+library(mice)#check record completeness and imputation
+library(ggmap)#spatial visualization and online map resources
+library(sf)#simple features for geospatial plots
+library(mapview)#interactive spatial visualizations
+library(tmap)#interactive maps and open source map layers
+library(tidyverse)#includes ggplot2, dplyr, tidyr, purrr, stringr, etc.
+```
+
+### Load Data
+
+One way to access data from the Toronto Open Data Catalogue is through their API.  You can access the API using Python, node.js or R.  The script below uses the _opendatatoronto_ package to load the following data:
+- [Bike Share Ridership](https://open.toronto.ca/dataset/bike-share-toronto-ridership-data/)
+- [Bike Share Station Locations](https://open.toronto.ca/dataset/bike-share-toronto/)
+- [Neighbourhood Profiles](https://open.toronto.ca/dataset/bike-share-toronto/)
+- [Shapefiles for Toronto Neighbourhoods](https://open.toronto.ca/dataset/bike-share-toronto/)
+```{r Loadpackage1}
+#Get datasets (called packages) from the Open Data Catalogue by dataset code
+#Bike Share Ridership package 
+package_ride <- show_package("7e876c24-177c-4605-9cef-e50dd74c617f") %>% list_package_resources()
+```
+```{r Loadpackage2}
+#Bike Share Station Locations 
+package_station <- show_package("2b44db0d-eea9-442d-b038-79335368ad5a") %>% list_package_resources()
+```
+```{r Loadpackage3}
+#Neighbourhood profiles data
+package_neigh <- show_package("6e19a90f-971c-46b3-852c-0c48c436d1fc") %>% list_package_resources()
+```
+```{r Loadpackage4}
+#Neighbourhoods shapefiles
+package_neigh_shp <- show_package("4def3f65-2a65-4a4f-83c4-b2a4aed72d46") %>% list_package_resources()
+```
+```{r Loadresource1}
+#Download the specific data files (called resources) of interest from the packages
+#Bike Share ridership
+ride_raw2017 <- package_ride %>% slice(4) %>% get_resource()
+#ride_raw2018 <- package_ride %>% slice(6) %>% get_resource() #not currently working issue reported on Git https://github.com/sharlagelfand/opendatatoronto/issues/10 
+```
+```{r Loadresource2}
+#Bike Share Stations
+station_raw <- package_station %>% slice(1) %>% get_resource()
+```
+```{r Loadresource3}
+#Neighbourhood profiles data
+neigh_raw <- 	filter(package_neigh, row_number()==1) %>% get_resource()
+```
+```{r Loadresource4}
+#Neighbourhood shapefiles
+neigh_shp <- 	filter(package_neigh_shp, row_number()==1) %>% get_resource()
+```
+
+The most up-to-date station information is provided via a feed, which can be accessed and loaded from the Bike Share Station resources.
+```{r Format resource3 into dataframe, warning=FALSE, error=FALSE}
+#Select the station information URL from the resource object to get access to the JSON file
+stationURL <- station_raw$data$en$feeds$url[3]
+#Use the jsonlite package to stream in the data from the URL
+station_raw_json <- stream_in(url(stationURL))
+#Extract and name the dataframe object from the streamed in data
+stations <- as.data.frame(station_raw_json$data$stations)
+head(stations)
+```
+
+You can also load data from Toronto's Open Data Catalogue by downloading the files of interest and accessing them locally. Since there is an issue with loading the 2018 Bike Share Ridership data via API (reported on [Git](https://github.com/sharlagelfand/opendatatoronto/issues/10)), I've load these files from a local drive. 
+
+The raw data is separated by quarter. As you'll see below, the data from 2018 is more complete and consistent than from 2017. For data preparation I kept the data separate across years, but merged the 4 quarters within each year.
+```{r Merge data for 2018}
+#Working directory
+setwd("~/BikeShare")
+
+#Data source: https://open.toronto.ca/dataset/bike-share-toronto-ridership-data/ 
+Q1Bike <- read.csv("Data/Bike Share Toronto Ridership_Q1 2018.csv", stringsAsFactors = F)
+Q2Bike <- read.csv("Data/Bike Share Toronto Ridership_Q2 2018.csv", stringsAsFactors = F)
+Q3Bike <- read.csv("Data/Bike Share Toronto Ridership_Q3 2018.csv", stringsAsFactors = F)
+Q4Bike <- read.csv("Data/Bike Share Toronto Ridership_Q4 2018.csv", stringsAsFactors = F)
+
+#Combine records from Q1 to Q4
+ride2018 <- bind_rows(Q1Bike, Q2Bike, Q3Bike, Q4Bike)
+
+#remove temp objects
+rm(Q1Bike)
+rm(Q2Bike)
+rm(Q3Bike)
+rm(Q4Bike)
+```
+
+### Data Cleaning
+
+I started data cleaning by focusing on the date fields. The fields needed to be converted to a standard date format across all files. In the 2017 data, the date field was formatted differently for each quarter. So I cleaned the date fields before bringing the 4 quarters together. 
+
+```{r Merge & clean data for 2017, warning=FALSE, error=FALSE}
+#Data source: https://open.toronto.ca/dataset/bike-share-toronto-ridership-data/ 
+Q1Bike <- ride_raw2017$`Bikeshare Ridership (2017 Q1).csv`
+Q2Bike <- ride_raw2017$`Bikeshare Ridership (2017 Q2).csv`
+Q3Bike <- ride_raw2017$`Bikeshare Ridership (2017 Q3).csv`
+Q4Bike <- ride_raw2017$`Bikeshare Ridership (2017 Q4).csv`
+
+#Note: the format for dates varies across the 4 quarters, so conversion from 
+#character to POSIXct must be done before merging the data across quarters.
+#Convert the date to date format (use the lubridate package)#start time and date
+Q1Bike$trip_start_time <-dmy_hm(Q1Bike$trip_start_time)
+Q2Bike$trip_start_time <-dmy_hm(Q2Bike$trip_start_time)
+Q3Bike$trip_start_time <-mdy_hm(Q3Bike$trip_start_time)
+Q4Bike$trip_start_time <-mdy_hms(Q4Bike$trip_start_time)
+#stop time and date
+Q1Bike$trip_stop_time <-dmy_hm(Q1Bike$trip_stop_time)
+Q2Bike$trip_stop_time <-dmy_hm(Q2Bike$trip_stop_time)
+Q3Bike$trip_stop_time <-mdy_hm(Q3Bike$trip_stop_time)
+Q4Bike$trip_stop_time <-mdy_hms(Q4Bike$trip_stop_time)
+#note: The "1 failed to parse" warning relates to record 295639, which is NULLNULL and NULL for stop_time and to_station, respectively. The record is retained for now because the other data seems valid. 
+
+#Combine records from Q1 to Q4
+ride2017 <- bind_rows(Q1Bike, Q2Bike, Q3Bike, Q4Bike)
+
+#remove temp objects
+rm(Q1Bike)
+rm(Q2Bike)
+rm(Q3Bike)
+rm(Q4Bike)
+```
+
+```{r Clean dates for 2018 data}
+#Convert the date to date format (use the lubridate package)#start time and date
+ride2018$trip_start_time <-mdy_hm(ride2018$trip_start_time)
+#stop time and date
+ride2018$trip_stop_time <-mdy_hm(ride2018$trip_stop_time)
+```
+
+```{r Remove temp files}
+#Remove the Open Data packages and raw data
+rm(package_neigh, package_neigh_shp, package_ride, package_station, ride_raw2017, station_raw, station_raw_json)
+```
+
+Next, I checked the records for completeness.  
+```{r Complete_Cases_1}
+paste("In 2017,", round(sum(complete.cases(ride2017))/nrow(ride2017)*100,0),"percent of records are complete.")
+paste("In 2018,", round(sum(complete.cases(ride2018))/nrow(ride2018)*100,0),"percent of records are complete.")
+
+#use mice package to visualize the missing data
+md.pattern(ride2017, rotate.names = T)
+
+```
+
+The 2018 data is complete, but the 2017 data is missing information about station_id. And one record is missing the trip stop time.
+
+#### Ride duration and time
+
+First, I check the record with a missing stop time. In addition to not have a stop time the trip duration is listed as 0.  Likely, this isn't a valid record. Let's dig deeper. How many rides of less than 1 minute are there in each year? Are there rides of exactly 1 minute in each year?
+```{r Check for short rides}
+paste("In 2017,", sum(ride2017$trip_duration_seconds <=59),"rides were less than 1 min.")
+paste("In 2018,", sum(ride2018$trip_duration_seconds <=59),"rides were less than 1 min.")
+
+paste("In 2017,", sum(ride2017$trip_duration_seconds ==60),"rides were 1 min. long.")
+paste("In 2018,", sum(ride2018$trip_duration_seconds ==60),"rides were 1 min. long.")
+```
+
+It looks like rides less than 1 minute long were removed from the 2018 data. For consistency in analyses across years, I will remove rides that are less than 1 min in duration (including the record with the missing stop time) fromt he 2017 data.  
+
+```{r Remove records <1 min from 2017}
+ride2017 <- ride2017[-which(ride2017$trip_duration_seconds <=59),]
+```
+
+#### Station IDs
+
+There are 996,843 records that have their station_id missing in the 2017 data. I plan to use the station_id as a linking variable to get the longitude and latitute for each station from the stations dataframe. So, filling in missing values is important.
+
+First, I will impute the station_ids from within the 2017 data itself.  If the station location (aka station_name) exists somewhere else in the data where it has an id, I will impute the id from the current file. Then I will do fuzzy matching between station names with an ID and station names without an ID in the dataset to impute data that may be missing due to typos, text errors, etc.
+
+```{r Create list of stations with ids in 2017}
+#Create the full list of stations with and without station IDs 
+from_list <- ride2017 %>%
+  select(from_station_name, 
+         from_station_id) %>% 
+  rename(station_name = from_station_name) %>% 
+  rename(station_id = from_station_id)
+
+to_list <- ride2017 %>% 
+  select(to_station_name, 
+         to_station_id) %>% 
+  rename(station_name = to_station_name) %>% 
+  rename(station_id = to_station_id)
+
+st_list <- rbind(from_list, to_list) %>% 
+  unique() %>% 
+  arrange(station_name)
+
+#Create a subset list of values for direct imputation
+st_list_replace <- st_list[duplicated(st_list$station_name)|duplicated(st_list$station_name, fromLast = T),] %>% filter(is.na(station_id)==FALSE)
+
+#Create a list of values for fuzzy matching
+st_list_fuzzy <- st_list[st_list$station_name %in% st_list_replace$station_name==F,]
+
+#remove temp tables
+rm(from_list, to_list, st_list)
+```
+```{r Impute known stations}
+setDT(ride2017)
+setDT(st_list_replace)
+#Create a reference table of trip_id and from_station_id 
+from_dt <- st_list_replace[ride2017, on = c(station_name = "from_station_name")]
+from_dt[is.na(from_station_id) == T, from_station_id := station_id ]
+from_dt <- from_dt[,.(trip_id, from_station_id)]
+#Impute from_station_id with NAs from the reference table
+ride2017 <- from_dt[ride2017, on = c(trip_id = "trip_id")]
+ride2017[is.na(i.from_station_id)==T, i.from_station_id:=from_station_id]
+ride2017 <- ride2017 %>% 
+  select(-from_station_id) %>% 
+  rename(from_station_id = i.from_station_id)
+
+#Create a reference table of trip_id and to_station_id 
+to_dt <- st_list_replace[ride2017, on = c(station_name = "to_station_name")]
+to_dt[is.na(to_station_id) == T, to_station_id := station_id ]
+to_dt <- to_dt[,.(trip_id, to_station_id)]
+#Impute from_station_id with NAs from the reference table
+ride2017 <- to_dt[ride2017, on = c(trip_id = "trip_id")]
+ride2017[is.na(i.to_station_id)==T, i.to_station_id:=to_station_id]
+ride2017 <- ride2017 %>% 
+  select(-to_station_id) %>% 
+  rename(to_station_id = i.to_station_id)
+
+#remove temp tables
+rm(from_dt)
+rm(to_dt)
+```
+
+There are some typos in the remaining station names. Second, I used fuzzy matching (based on Full Damerau-Levenshtein) to find the station names with IDs that matched to station names without IDs and imputed missingstation_ids into ride2017.
+
+```{r Fuzzy Match Station Name within Dataset}
+#create a reference list of station names
+st_fuzzy_ref <- st_list_fuzzy[is.na(st_list_fuzzy$station_id)==F,]
+
+fullDL <- matrix(NA, ncol = length(st_fuzzy_ref$station_name), nrow = length(st_list_fuzzy$station_name))
+for(i in 1:length(st_fuzzy_ref$station_name)){
+  for(j in 1:length(st_list_fuzzy$station_name)){
+    fullDL[j,i] <- stringdist(tolower(st_fuzzy_ref[i,]$station_name), tolower(st_list_fuzzy[j,]$station_name), method = "dl") 
+  }
+}
+
+#find the minimum FullDL distance rowwise 
+#find the list and reference pair that have the lowest distance and return a table listing the matching stations and their distance
+match_ref_list <- NULL
+st_min <-apply(fullDL, 1, base::min)
+  for(i in 1:length(st_min))
+  {
+    ref_i <-match(st_min[i],fullDL[i,])
+    list_i <- i
+    match_ref_list<-rbind(data.frame(ref_i=ref_i,list_i=list_i,refName=st_fuzzy_ref[ref_i,], listName=st_list_fuzzy[list_i,], adist=st_min[i]),match_ref_list)
+  }
+```
+
+```{r Impute Stations 2}
+#Create a reference table of station_id and station_name to match to the ride2017 data
+#Manual inspection of the results indicates that station names with a distance of 2 or less are the same. Stations with a distance greater than 2 are different. The station ID for the stations that match (i.e., adist<=2) will be imputed to ride2017
+
+match_ref_list <- match_ref_list %>% 
+  filter(adist<=2) %>% 
+  select(refName.station_id,listName.station_name) %>% 
+  rename(station_id=refName.station_id, station_name = listName.station_name)
+setDT(match_ref_list)
+
+#Create a reference table of trip_id and from_station_id 
+from_dt <- match_ref_list[ride2017, on = c(station_name = "from_station_name")]
+from_dt[is.na(from_station_id) == T, from_station_id := station_id ]
+from_dt <- from_dt[,.(trip_id, from_station_id)]
+#Impute from_station_id with NAs from the reference table
+ride2017 <- from_dt[ride2017, on = c(trip_id = "trip_id")]
+ride2017[is.na(i.from_station_id)==T, i.from_station_id:=from_station_id]
+ride2017 <- ride2017 %>% 
+  select(-from_station_id) %>% 
+  rename(from_station_id = i.from_station_id)
+
+#Create a reference table of trip_id and to_station_id 
+to_dt <- match_ref_list[ride2017, on = c(station_name = "to_station_name")]
+to_dt[is.na(to_station_id) == T, to_station_id := station_id ]
+to_dt <- to_dt[,.(trip_id, to_station_id)]
+#Impute from_station_id with NAs from the reference table
+ride2017 <- to_dt[ride2017, on = c(trip_id = "trip_id")]
+ride2017[is.na(i.to_station_id)==T, i.to_station_id:=to_station_id]
+ride2017 <- ride2017 %>% 
+  select(-to_station_id) %>% 
+  rename(to_station_id = i.to_station_id)
+
+#remove temp tables
+rm(from_dt, to_dt)
+```
+
+I checked record completeness again. 
+```{r Complete_Cases 2}
+paste("In 2017,", round(sum(complete.cases(ride2017))/nrow(ride2017)*100,0),"percent of records are complete.")
+#use mice package to visualize the missing data
+md.pattern(ride2017, rotate.names = T)
+
+```
+
+There are still 230,670 records missing one or both station_id.  So, I did a second round of fuzzy matching between the 2017 dataset and the list of current stations from the Toronto Open Data Catalogue. Again, I used fuzzy matching based on Full Damerau-Levenshtein. I matched the station names in the Open Data Catalogue with the names from the 2017 ridership dataset and imputed station_ids that matched.
+
+```{r Fuzzy Match Stations Dataset}
+#from ride2017 create a list of the remaining station names that have station_id as NA
+from_list <- ride2017 %>%
+  select(from_station_name, 
+         from_station_id) %>% 
+  rename(station_name = from_station_name) %>% 
+  rename(station_id = from_station_id) %>% 
+  filter(is.na(station_id)) %>% unique()
+
+to_list <- ride2017 %>% 
+  select(to_station_name, 
+         to_station_id) %>% 
+  rename(station_name = to_station_name) %>% 
+  rename(station_id = to_station_id)%>% 
+  filter(is.na(station_id)) %>% unique()
+
+st_list_fuzzy <- rbind(from_list, to_list) %>% 
+  unique() %>% 
+  arrange(station_name)
+
+#create a reference list of station names from the Toronto Open Data Catalogue
+stations$station_id <- as.integer(stations$station_id) #convert station_id to integer
+st_fuzzy_ref <- stations %>% select(station_id,name) %>% rename(station_name = name)
+
+fullDL <- matrix(NA, ncol = length(st_fuzzy_ref$station_name), nrow = length(st_list_fuzzy$station_name))
+for(i in 1:length(st_fuzzy_ref$station_name)){
+  for(j in 1:length(st_list_fuzzy$station_name)){
+    fullDL[j,i] <- stringdist(tolower(st_fuzzy_ref[i,]$station_name), tolower(st_list_fuzzy[j,]$station_name), method = "dl") 
+  }
+}
+
+#find the minimum FullDL distance rowwise 
+#find the list and reference pair that have the lowest distance and return a table listing the matching stations and their distance
+match_ref_list <- NULL
+st_min <-apply(fullDL, 1, base::min)
+  for(i in 1:length(st_min))
+  {
+    ref_i <-match(st_min[i],fullDL[i,])
+    list_i <- i
+    match_ref_list<-rbind(data.frame(ref_i=ref_i,list_i=list_i,refName=st_fuzzy_ref[ref_i,], listName=st_list_fuzzy[list_i,], adist=st_min[i]),match_ref_list)
+  }
+
+rm(from_list, to_list)
+```
+
+```{r Impute Stations 3}
+#Create a reference table of station_id and station_name to match to the ride2017 data
+#Manual inspection of the results indicates that station names with a distance of 1 or less are the same. There were 3 other stations: "Summerhill Ave / MacLennan Ave - SMART", "Dovercourt Rd / Harrison St - SMART", and "Lake Shore Blvd W / Ontario Dr(Ontario Place)", with greater distances but that match based on manual inspection. The station ID for the stations that match (i.e., adist<=1 + 3 extra) will be imputed to ride2017
+
+match_ref_list <- rbind(match_ref_list %>%filter(adist<=1),
+  match_ref_list %>% filter(listName.station_name %in% c(
+    "Summerhill Ave / MacLennan Ave - SMART",
+    "Dovercourt Rd / Harrison St - SMART",
+    "Lake Shore Blvd W / Ontario Dr(Ontario Place)"))) %>% 
+  select(refName.station_id,listName.station_name) %>% 
+  rename(station_id=refName.station_id, station_name = listName.station_name)
+
+setDT(match_ref_list)
+
+#Create a reference table of trip_id and from_station_id 
+from_dt <- match_ref_list[ride2017, on = c(station_name = "from_station_name")]
+from_dt[is.na(from_station_id) == T, from_station_id := station_id ]
+from_dt <- from_dt[,.(trip_id, from_station_id)]
+#Impute from_station_id with NAs from the reference table
+ride2017 <- from_dt[ride2017, on = c(trip_id = "trip_id")]
+ride2017[is.na(i.from_station_id)==T, i.from_station_id:=from_station_id]
+ride2017 <- ride2017 %>% 
+  select(-from_station_id) %>% 
+  rename(from_station_id = i.from_station_id)
+
+#Create a reference table of trip_id and to_station_id 
+to_dt <- match_ref_list[ride2017, on = c(station_name = "to_station_name")]
+to_dt[is.na(to_station_id) == T, to_station_id := station_id ]
+to_dt <- to_dt[,.(trip_id, to_station_id)]
+#Impute from_station_id with NAs from the reference table
+ride2017 <- to_dt[ride2017, on = c(trip_id = "trip_id")]
+ride2017[is.na(i.to_station_id)==T, i.to_station_id:=to_station_id]
+ride2017 <- ride2017 %>% 
+  select(-to_station_id) %>% 
+  rename(to_station_id = i.to_station_id)
+
+#remove temp tables
+rm(from_dt,to_dt)
+```
+
+After the third round of station_id imputation, I was happy to find that 98% of 2017 cases are now complete. 
+```{r Complete_Cases 3}
+paste("In 2017,", round(sum(complete.cases(ride2017))/nrow(ride2017)*100,0),"percent of records are complete.")
+#use mice package to visualize the missing data
+md.pattern(ride2017, rotate.names = T)
+```
+
+### Geocoding Bike Share Ridership records
+
+To prepare the Bike Share Ridership data for geographic analysis, I need to include longitude and latitude data for the origin and destination stations for each record. I got that information from the current station list or GoogleMaps' API.  
+
+A few records had to be removed because they didn't have a physical location for their station name that could be searched. 
+```{r records removed - no location}
+#Create a new df that will include the geographic info
+ride2017_geo <- ride2017
+#Two percent of the records still have missing id information. The information is missing for the following 5 stations and Null values
+temp <- rbind(ride2017_geo %>% 
+        filter(is.na(from_station_id)) %>% 
+        select(from_station_name) %>% 
+        rename(station_name=from_station_name),
+      ride2017_geo %>% 
+        filter(is.na(to_station_id)) %>% 
+        select(to_station_name) %>% 
+        rename(station_name=to_station_name)) %>% 
+  count(station_name) %>% 
+  distinct()
+
+#"Base Station" and "Fringe Next Stage-7219" and NULL values can't be geolocated so they are removed. 
+temp <- temp %>% filter(station_name=="Base Station"|station_name=="Fringe Next Stage - 7219"|station_name=="NULL")
+ride2017_geo <- ride2017_geo[-which(ride2017_geo$from_station_name %in% temp$station_name|ride2017_geo$to_station_name %in% temp$station_name),]
+
+#remove temp files
+rm(temp)
+```
+I used the GoogleMaps API to geolocate records that were missing station_ids such as:
+
+* "Michael Sweet Ave / St. Patrick St"
+* "Roxton Rd / College St"
+* "York St / King St W - SMART" 
+
+There were also several station_ids that were reassigned to new locations or that are missing from the current station list. I also found those locations from the GoogleMaps API.
+```{r geolocation using station data 2017, warning=FALSE, error=FALSE}
+#First, link the Ride 2017 data with the lat/lon data from stations for their from locations
+ride2017_geo <- left_join(ride2017_geo, stations[,c(1,2,4,5,7)], by=c("from_station_id"="station_id"))
+setnames(ride2017_geo, old = c('name','lat','lon','address'), new = c('from_name_reflist','from_lat', 'from_lon', 'from_address'))
+```
+```{r geolocation using googlemaps API 2017, warning=FALSE, error=FALSE}
+#Register GoogleMAP API key
+register_google(key = keyring::key_get("GoogleMapAPI", username = "levinemi"))
+#get the lon & lat for the missing locations
+locations <- ride2017_geo %>% 
+  filter(is.na(from_station_id)|from_station_id %in% c(7074, 7072,7084, 7086, 7133,7068)) %>%
+  select(from_station_name, from_station_id) %>% 
+  distinct()
+locations$from_station_name <- paste0(locations$from_station_name,", Toronto, ON") 
+#If "Toronto,ON" is not added the locations will be all over North America
+locations <- mutate_geocode(locations, from_station_name)
+locations$from_station_name <- str_replace_all(locations$from_station_name,", Toronto, ON","")
+
+#combine the new lon & lat with ride2017_geo, replace the old from_lon and from_lat values for the 7 locations
+ride2017_geo <- left_join(ride2017_geo, locations, by="from_station_name")
+ride2017_geo[from_station_name %in% c(locations$from_station_name), from_lat:=lat]
+ride2017_geo[from_station_name %in% c(locations$from_station_name), from_lon:=lon]
+ride2017_geo[,(14:16):=NULL]
+setnames(ride2017_geo, old = c('from_station_id.x'), new = c('from_station_id'))
+
+#Second, link the Ride2017_geo data with the lat/lon data for to_stations
+ride2017_geo <- left_join(ride2017_geo, stations[,c(1,2,4,5,7)],by=c("to_station_id"="station_id"))
+setnames(ride2017_geo, old = c('name','lat','lon','address'), new = c('to_name_reflist','to_lat', 'to_lon', 'to_address'))
+
+#combine the new lon & lat with ride2017_geo, replace the old to_lon and to_lat values for the missing locations
+ride2017_geo <- left_join(ride2017_geo, locations, by=c("to_station_name"="from_station_name"))
+ride2017_geo[to_station_name %in% c(locations$from_station_name), to_lat:=lat]
+ride2017_geo[to_station_name %in% c(locations$from_station_name), to_lon:=lon]
+ride2017_geo[,(18:20):=NULL]
+setnames(ride2017_geo, old = c('from_station_id.x'), new = c('from_station_id'))
+
+#remove temp objects
+rm(locations)
+````
+```{r geolocation 2018, warning=FALSE, error=FALSE}
+#First, link the Ride 2018 data with the lat/lon data from stations for their 'from' locations
+ride2018_geo <- ride2018
+setDT(ride2018_geo)
+ride2018_geo <- left_join(ride2018_geo, stations[,c(1,2,4,5,7)], by=c("from_station_id"="station_id"))
+setnames(ride2018_geo, old = c('name','lat','lon','address'), new = c('from_name_reflist','from_lat', 'from_lon', 'from_address'))
+
+#There are station locations that don't match between ridership data from 2018 and the station data from 2020.  I get those stations geolocation from the google API and replace it in the ride2018_geo dataframe.
+locations <- ride2018_geo %>% 
+  filter(is.na(from_station_id)|from_station_id %in% c(7029,7074, 7072,7335,7133,7068, 7219, 7060)) %>%
+  select(from_station_name, from_station_id) %>% 
+  distinct()
+locations$from_station_name <- paste0(locations$from_station_name,", Toronto, ON") #If "Toronto,ON" is not added the locations will be all over North America
+locations <- mutate_geocode(locations, from_station_name)
+locations$from_station_name <- str_replace_all(locations$from_station_name,", Toronto, ON","")
+
+#combine the new lon & lat with ride2018_geo, replace the old from_lon and from_lat values for the missing locations
+ride2018_geo <- left_join(ride2018_geo, locations, by="from_station_name")
+ride2018_geo[from_station_name %in% c(locations$from_station_name), from_lat:=lat]
+ride2018_geo[from_station_name %in% c(locations$from_station_name), from_lon:=lon]
+ride2018_geo[,(14:16):=NULL]
+setnames(ride2018_geo, old = c('from_station_id.x'), new = c('from_station_id'))
+
+#Link the Ride2018_geo data with the lat/lon data for 'to' stations
+ride2018_geo <- left_join(ride2018_geo, stations[,c(1,2,4,5,7)],by=c("to_station_id"="station_id"))
+setnames(ride2018_geo, old = c('name','lat','lon','address'), new = c('to_name_reflist','to_lat', 'to_lon', 'to_address'))
+
+#combine the new lon & lat with ride2018_geo, replace the old to_lon and to_lat values for the 4 locations
+ride2018_geo <- left_join(ride2018_geo, locations, by=c("to_station_name"="from_station_name"))
+ride2018_geo[to_station_name %in% c(locations$from_station_name), to_lat:=lat]
+ride2018_geo[to_station_name %in% c(locations$from_station_name), to_lon:=lon]
+ride2018_geo[,(18:20):=NULL]
+setnames(ride2018_geo, old = c('from_station_id.x'), new = c('from_station_id'))
+
+#remove temp objects
+rm(locations)
+```
+```{r Remove extra objects from data cleaning and preparation}
+rm(fullDL, match_ref_list, st_fuzzy_ref, st_list_fuzzy, st_list_replace, i, j, list_i, ref_i, st_min, stationURL)
+```
+
+### Final Bike Share Ridership Data
+
+I combined the 2017 and 2018 data and to create sf objects for the ridership point data. 
+```{r Combine the datasets across years}
+#Reorder the columns for 2018 to match those of 2017
+setcolorder(ride2018_geo, c(colnames(ride2017_geo)))
+
+#Convert the combined df to a spatial object
+#for the from locations
+ride_geo <- setDF(rbind(ride2017_geo,ride2018_geo))
+ride_from_sf <-  st_as_sf(ride_geo,
+    coords = c("from_lon", "from_lat"),
+    crs=4326 # the EPSG identifier for WGS84 projection
+  )
+
+#for the to locations
+ride_to_sf <-  st_as_sf(ride_geo,
+    coords = c("to_lon", "to_lat"),
+    crs=4326, # the EPSG identifier for WGS84 projection
+    stringsAsFactors = FALSE,
+    remove=TRUE
+  )
+```
+
+### Group Bike Share Ridership Data with the Neighbourhood
+
+The final step is a visual check of the ridership data.  I group the ridership data by the neighbourhood where the trip started. I calculate the average ride duration by neighbourhood and show it on a map of the city. 
+```{r Creation of neighbourhood polygon dataframe, warning=FALSE, error=FALSE}
+#Find the neighbourhood where each ride starts(spatial join)
+neigh_start <- st_join(ride_from_sf, neigh_shp, join=st_within)
+
+#calculate the average duration in seconds of trips based on their starting position
+avg_ride_in_neigh <- as_tibble(neigh_start) %>% 
+  group_by(AREA_LONG_CODE) %>% 
+  summarize(avg_ride_min = round((mean(trip_duration_seconds, na.rm = T)/60),0))
+#Add the average ride duration (in minutes) to the shapefile dataframe 
+neigh_counts <- left_join(neigh_shp, avg_ride_in_neigh, by = "AREA_LONG_CODE")
+
+```
+start by setting the map mode to interactive
+```{r Map Mode}
+tmap_mode("plot") #sets the system to interactive viewing mode
+```
+
+```{r Maps for trip duration}
+tm_basemap("OpenStreetMap.Mapnik")+
+  tm_shape(neigh_counts)+
+    tm_fill(col = "avg_ride_min",
+            palette = "Greens",
+            style = "cont",
+            contrast = c(0.1, 1),
+            title = "Avg ride duration",
+            id = "AREA_LONG_CODE",
+            showNA = F, 
+            alpha = 0.8,
+            popup.vars=c("Neighbourhood" = "AREA_NAME","Avg. Ride (min)"="avg_ride_min"),
+               popup.format=list(AREA_NAME=list(text.align = "left")))+
+  tm_layout("Average Ride Time by Starting Neighbourhood",
+            title.size = 10,
+            legend.title.size = 2,
+            legend.text.size = 1)+
+  tm_view(view.legend.position = c("left","bottom"))
+```
+
