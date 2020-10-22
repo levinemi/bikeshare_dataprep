@@ -4,7 +4,7 @@ Run this code to load and clean data for Toronto Bike Share analyses.
 Key Features in Project
 * API integration (both OpenData and Google Maps)
 * Fuzzy matching 
-* Data.table for efficient modifications to large tables
+* Data.table for efficient modifications to large dataframes
 * sf and tmap packages for GIS objects/mapping
 
 Dependencies
