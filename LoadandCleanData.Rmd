@@ -110,6 +110,9 @@ rm(Q4Bike)
 ```
 
 ```{r Merge data for 2019}
+#Working directory
+setwd("~/BikeShare")
+
 #Data source: https://open.toronto.ca/dataset/bike-share-toronto-ridership-data/ 
 Q1Bike <- read.csv("Data/2019-Q1.csv", stringsAsFactors = F)
 Q2Bike <- read.csv("Data/2019-Q2.csv", stringsAsFactors = F)
