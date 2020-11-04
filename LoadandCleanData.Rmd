@@ -57,8 +57,10 @@ package_neigh_shp <- show_package("4def3f65-2a65-4a4f-83c4-b2a4aed72d46") %>% li
 ```{r Loadresource1}
 #Download the specific data files (called resources) of interest from the packages
 #Bike Share ridership
-ride_raw2017 <- package_ride %>% slice(4) %>% get_resource()
+ride_raw2017 <- package_ride %>% slice(5) %>% get_resource()
 #ride_raw2018 <- package_ride %>% slice(6) %>% get_resource() #not currently working issue reported on Git https://github.com/sharlagelfand/opendatatoronto/issues/10 
+#ride_raw2019 <- package_ride %>% slice(7) %>% get_resource() #not working due to character encoding issue
+#ride_raw2020 <- package_ride %>% slice(8) %>% get_resource() #not working due to character encoding issue
 ```
 ```{r Loadresource2}
 #Bike Share Stations
@@ -99,6 +101,26 @@ Q4Bike <- read.csv("Data/Bike Share Toronto Ridership_Q4 2018.csv", stringsAsFac
 
 #Combine records from Q1 to Q4
 ride2018 <- bind_rows(Q1Bike, Q2Bike, Q3Bike, Q4Bike)
+
+#remove temp objects
+rm(Q1Bike)
+rm(Q2Bike)
+rm(Q3Bike)
+rm(Q4Bike)
+```
+
+```{r Merge data for 2019}
+#Data source: https://open.toronto.ca/dataset/bike-share-toronto-ridership-data/ 
+Q1Bike <- read.csv("Data/2019-Q1.csv", stringsAsFactors = F)
+Q2Bike <- read.csv("Data/2019-Q2.csv", stringsAsFactors = F)
+Q3Bike <- read.csv("Data/2019-Q3.csv", stringsAsFactors = F)
+Q4Bike <- read.csv("Data/2019-Q4.csv", stringsAsFactors = F)
+
+#Fix End Station ID format in Q1
+Q1Bike$End.Station.Id <- as.character(Q1Bike$End.Station.Id)
+
+#Combine records from Q1 to Q4
+ride2019 <- bind_rows(Q1Bike, Q2Bike, Q3Bike, Q4Bike)
 
 #remove temp objects
 rm(Q1Bike)
@@ -149,6 +171,34 @@ ride2018$trip_start_time <-mdy_hm(ride2018$trip_start_time)
 ride2018$trip_stop_time <-mdy_hm(ride2018$trip_stop_time)
 ```
 
+```{r Clean dates for 2019 data}
+#Convert the date to date format (use the lubridate package)#start time and date
+ride2019$Start.Time <-mdy_hm(ride2019$Start.Time)
+#stop time and date
+ride2019$End.Time <-mdy_hm(ride2019$End.Time)
+```
+
+The 2019 data has 2 additional columns Subscription.Id and Bike.Id. Those fields are not part of my planned analyses, so I remove them. I also reorder and rename the columns for 2019 to match the names for 2017 and 2018.  
+```{r Clean columns and data types 2019}
+
+ride2019 <- ride2019 %>% select(-c(Subscription.Id, Bike.Id)) %>% 
+  rename("trip_id" = "ï..Trip.Id",
+         "trip_duration_seconds" = "Trip..Duration",
+         "from_station_id" = "Start.Station.Id",
+         "trip_start_time"= "Start.Time",
+         "from_station_name" = "Start.Station.Name",
+         "trip_stop_time" = "End.Time",
+         "to_station_id" = "End.Station.Id",
+         "to_station_name" = "End.Station.Name",
+         "user_type"= "User.Type") %>% 
+  relocate(to_station_id, .after = trip_stop_time)
+
+#convert from_station_id and to_station_id from character to integer
+
+ride2019$from_station_id <- as.integer(ride2019$from_station_id)
+ride2019$to_station_id <- as.integer(ride2019$to_station_id)
+```
+
 ```{r Remove temp files}
 #Remove the Open Data packages and raw data
 rm(package_neigh, package_neigh_shp, package_ride, package_station, ride_raw2017, station_raw, station_raw_json)
@@ -158,13 +208,14 @@ Next, I checked the records for completeness.
 ```{r Complete_Cases_1}
 paste("In 2017,", round(sum(complete.cases(ride2017))/nrow(ride2017)*100,0),"percent of records are complete.")
 paste("In 2018,", round(sum(complete.cases(ride2018))/nrow(ride2018)*100,0),"percent of records are complete.")
+paste("In 2019,", round(sum(complete.cases(ride2019))/nrow(ride2019)*100,0),"percent of records are complete.")
 
 #use mice package to visualize the missing data
 md.pattern(ride2017, rotate.names = T)
 
 ```
 
-The 2018 data is complete, but the 2017 data is missing information about station_id. And one record is missing the trip stop time.
+The 2019 and 2018 data are complete, but the 2017 data is missing information about station_id. And one record is missing the trip stop time.
 
 #### Ride duration and time
 
@@ -172,15 +223,18 @@ First, I check the record with a missing stop time. In addition to not have a st
 ```{r Check for short rides}
 paste("In 2017,", sum(ride2017$trip_duration_seconds <=59),"rides were less than 1 min.")
 paste("In 2018,", sum(ride2018$trip_duration_seconds <=59),"rides were less than 1 min.")
+paste("In 2019,", sum(ride2019$trip_duration_seconds <=59),"rides were less than 1 min.")
 
 paste("In 2017,", sum(ride2017$trip_duration_seconds ==60),"rides were 1 min. long.")
 paste("In 2018,", sum(ride2018$trip_duration_seconds ==60),"rides were 1 min. long.")
+paste("In 2019,", sum(ride2019$trip_duration_seconds ==60),"rides were 1 min. long.")
 ```
 
-It looks like rides less than 1 minute long were removed from the 2018 data. For consistency in analyses across years, I will remove rides that are less than 1 min in duration (including the record with the missing stop time) fromt he 2017 data.  
+It looks like rides less than 1 minute long were removed from the 2018 data. For consistency in analyses across years, I will remove rides that are less than 1 min in duration from the 2017 and 2019 data. And I will remove the record with the missing stop time) from the 2017 data.  
 
 ```{r Remove records <1 min from 2017}
 ride2017 <- ride2017[-which(ride2017$trip_duration_seconds <=59),]
+ride2019 <- ride2019[-which(ride2019$trip_duration_seconds <=59),]
 ```
 
 #### Station IDs
@@ -519,20 +573,59 @@ setnames(ride2018_geo, old = c('from_station_id.x'), new = c('from_station_id'))
 #remove temp objects
 rm(locations)
 ```
+```{r geolocation 2019, warning=FALSE, error=FALSE}
+#First, link the Ride 2019 data with the lat/lon data from stations for their 'from' locations
+ride2019_geo <- ride2019
+setDT(ride2019_geo)
+ride2019_geo <- left_join(ride2019_geo, stations[,c(1,2,4,5,7)], by=c("from_station_id"="station_id"))
+setnames(ride2019_geo, old = c('name','lat','lon','address'), new = c('from_name_reflist','from_lat', 'from_lon', 'from_address'))
+
+#There are station locations that don't match between ridership data from 2019 and the station data from 2020.  I get those stations geolocation from the google API and replace it in the ride2019_geo dataframe.
+locations <- ride2019_geo %>% 
+  filter(is.na(from_station_id)|from_station_id %in% c(7029,7074, 7072,7335,7133,7068, 7219, 7060)) %>%
+  select(from_station_name, from_station_id) %>% 
+  distinct()
+locations$from_station_name <- paste0(locations$from_station_name,", Toronto, ON") #If "Toronto,ON" is not added the locations will be all over North America
+locations <- mutate_geocode(locations, from_station_name)
+locations$from_station_name <- str_replace_all(locations$from_station_name,", Toronto, ON","")
+
+#combine the new lon & lat with ride2019_geo, replace the old from_lon and from_lat values for the missing locations
+ride2019_geo <- left_join(ride2019_geo, locations, by="from_station_name")
+ride2019_geo[from_station_name %in% c(locations$from_station_name), from_lat:=lat]
+ride2019_geo[from_station_name %in% c(locations$from_station_name), from_lon:=lon]
+ride2019_geo[,(14:16):=NULL]
+setnames(ride2019_geo, old = c('from_station_id.x'), new = c('from_station_id'))
+
+#Link the Ride2019_geo data with the lat/lon data for 'to' stations
+ride2019_geo <- left_join(ride2019_geo, stations[,c(1,2,4,5,7)],by=c("to_station_id"="station_id"))
+setnames(ride2019_geo, old = c('name','lat','lon','address'), new = c('to_name_reflist','to_lat', 'to_lon', 'to_address'))
+
+#combine the new lon & lat with ride2019_geo, replace the old to_lon and to_lat values for the 4 locations
+ride2019_geo <- left_join(ride2019_geo, locations, by=c("to_station_name"="from_station_name"))
+ride2019_geo[to_station_name %in% c(locations$from_station_name), to_lat:=lat]
+ride2019_geo[to_station_name %in% c(locations$from_station_name), to_lon:=lon]
+ride2019_geo[,(18:20):=NULL]
+setnames(ride2019_geo, old = c('from_station_id.x'), new = c('from_station_id'))
+
+#remove temp objects
+rm(locations)
+```
+
 ```{r Remove extra objects from data cleaning and preparation}
 rm(fullDL, match_ref_list, st_fuzzy_ref, st_list_fuzzy, st_list_replace, i, j, list_i, ref_i, st_min, stationURL)
 ```
 
 ### Final Bike Share Ridership Data
 
-I combined the 2017 and 2018 data and to create sf objects for the ridership point data. 
+I combined the 2017, 2018 and 2019 data to create sf objects for the ridership point data. 
 ```{r Combine the datasets across years}
-#Reorder the columns for 2018 to match those of 2017
+#Reorder the columns for 2019 and 2018 to match those of 2017
 setcolorder(ride2018_geo, c(colnames(ride2017_geo)))
+setcolorder(ride2019_geo, c(colnames(ride2017_geo)))
 
 #Convert the combined df to a spatial object
 #for the from locations
-ride_geo <- setDF(rbind(ride2017_geo,ride2018_geo))
+ride_geo <- setDF(rbind(ride2017_geo,ride2018_geo, ride2018_geo))
 ride_from_sf <-  st_as_sf(ride_geo,
     coords = c("from_lon", "from_lat"),
     crs=4326 # the EPSG identifier for WGS84 projection
